@@ -1,3 +1,24 @@
+.nsml.exe.old
+.nsmlignore
+data_loader3.py
+data_loader4.py
+data_loader5.py
+data_loader6.py
+LICENSE-THIRD-PARTY.txt
+main2.py
+main3.py
+main4.py
+main5.py
+main6.py
+main7.py
+nsml.exe
+pretrained.py
+nsml.exe
+README.HACK.txt
+README.md
+submit_378_55.py
+examples-hack
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
