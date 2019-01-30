@@ -194,7 +194,7 @@ if __name__ == "__main__":
     """ Model """
     resnet_model = ResNet50(weights='imagenet', input_shape=(3,224,224))
     out = Dense(num_classes, activation='softmax')(resnet_model.layers[-2].output)
-    model = Model(inputs=vgg16_model.input, output=out)
+    model = Model(inputs=resnet_model.input, output=out)
     model.summary()
 
     bind_model(model)
