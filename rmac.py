@@ -6,46 +6,145 @@ from __future__ import print_function
 import os
 import argparse
 import time
-
-import nsml
+import scipy.io
 import numpy as np
 
+import nsml
 from nsml import DATASET_PATH
+
 import keras
-from keras.models import Sequential, Model
+from keras.models import Model, Sequential
+from keras.layers import Lambda, Dense, TimeDistributed, Input
+from keras.preprocessing import image
+import keras.backend as K
+
+from RoiPooling import RoiPooling
+from get_regions import rmac_regions, get_size_vgg_feat_map
 from keras.layers import Dense, Dropout, Flatten, Activation
-from keras.layers import Conv2D, MaxPooling2D
+from keras.layers import Convolution2D, MaxPooling2D
 from keras.callbacks import ReduceLROnPlateau
 from keras.preprocessing.image import ImageDataGenerator
 from keras.utils.training_utils import multi_gpu_model
+from keras.applications.vgg16 import VGG16
 from keras.applications.resnet50 import ResNet50
+
+K.set_image_dim_ordering('th')
+
+import warnings
+warnings.filterwarnings("ignore")
+
+
+
+
+def addition(x):
+    sum = K.sum(x, axis=1)
+    return sum
+
+
+def multi_input(generator, regions):
+    while True:
+        X1 = next(generator)
+        X2 = np.expand_dims(regions, axis=0)
+        yield [X1, X2]
+
+
+
+
+def rmac(model, num_rois):
+    # Regions as input
+    in_roi = Input(shape=(num_rois, 4), name='input_roi')
+    # ROI pooling
+    x = RoiPooling([1], num_rois)([model.layers[-3].output, in_roi])
+    # Normalization
+    x = Lambda(lambda x: K.l2_normalize(x, axis=2), name='norm1')(x)
+    # PCA
+    x = TimeDistributed(Dense(512, name='pca',
+                              kernel_initializer='identity',
+                              bias_initializer='zeros'))(x)
+    # Normalization
+    x = Lambda(lambda x: K.l2_normalize(x, axis=2), name='pca_norm')(x)
+    # Addition
+    rmac = Lambda(addition, output_shape=(512,), name='rmac')(x)
+    # # Normalization
+    rmac_norm = Lambda(lambda x: K.l2_normalize(x, axis=1), name='rmac_norm')(rmac)
+    
+    # Define model
+    model = Model(input=[model.input, in_roi], output=rmac_norm)
+    ## Load PCA weights
+    #mat = scipy.io.loadmat('data/PCAmatrices.mat')
+    #b = np.squeeze(mat['bias'], axis=1)
+    #w = np.transpose(mat['weights'])
+    #model.layers[-4].set_weights([w, b])
+    return model
+
+
+def l2_normalize(v):
+    norm = np.linalg.norm(v)
+    if norm == 0:
+        return v
+    return v / norm
+
+
+
 
 def bind_model(model):
     def save(dir_name):
         os.makedirs(dir_name, exist_ok=True)
-        model.save_weights(os.path.jaoin(dir_name, 'model'))
+        model.save_weights(os.path.join(dir_name, 'model'))
         print('model saved!')
 
     def load(file_path):
         model.load_weights(file_path)
         print('model loaded!')
 
+
+
     def infer(queries, _):
         test_path = DATASET_PATH + '/test/test_data'
 
-        db = [os.path.join(test_path, 'reference', path) for path in os.listdir(os.path.join(test_path, 'reference'))]
+        references = [os.path.join(test_path, 'reference', path) for path in os.listdir(os.path.join(test_path, 'reference'))]
 
         queries = [v.split('/')[-1].split('.')[0] for v in queries]
-        db = [v.split('/')[-1].split('.')[0] for v in db]
+        references = [v.split('/')[-1].split('.')[0] for v in references]
         queries.sort()
-        db.sort()
+        references.sort()
 
-        queries, query_vecs, references, reference_vecs = get_feature(model, queries, db)
+        # Load RMAC model
+        Wmap, Hmap = get_size_vgg_feat_map(224, 224)
+        regions = rmac_regions(Wmap, Hmap, 3)
+        rmac_model = rmac(model, len(regions))
+        rmac_model.summary()
 
+
+        test_datagen = ImageDataGenerator(dtype='float32')
+        query_generator = test_datagen.flow_from_directory(
+            directory=test_path,
+            target_size=(224, 224),
+            classes=['query'],
+            color_mode="rgb",
+            batch_size=1,
+            class_mode=None,
+            shuffle=False
+        )
+        query_vecs = rmac_model.predict_generator(multi_input(query_generator, regions), steps=len(query_generator), verbose=1)
+
+
+
+        reference_generator = test_datagen.flow_from_directory(
+            directory=test_path,
+            target_size=(224, 224),
+            classes=['reference'],
+            color_mode="rgb",
+            batch_size=1,
+            class_mode=None,
+            shuffle=False
+        )
+        reference_vecs = rmac_model.predict_generator(multi_input(reference_generator, regions), steps=len(reference_generator), verbose=1)
+    
         # l2 normalization
         query_vecs = l2_normalize(query_vecs)
         reference_vecs = l2_normalize(reference_vecs)
-
+        
         # Calculate cosine similarity
         sim_matrix = np.dot(query_vecs, reference_vecs.T)
         indices = np.argsort(sim_matrix, axis=1)
@@ -61,52 +160,14 @@ def bind_model(model):
         print('done')
 
         return list(zip(range(len(retrieval_results)), retrieval_results.items()))
-
+    
     # DONOTCHANGE: They are reserved for nsml
     nsml.bind(save=save, load=load, infer=infer)
 
 
-def l2_normalize(v):
-    norm = np.linalg.norm(v)
-    if norm == 0:
-        return v
-    return v / norm
 
 
-# data preprocess
-def get_feature(model, queries, db):
-    img_size = (224, 224)
-    test_path = DATASET_PATH + '/test/test_data'
-
-    intermediate_layer_model = Model(inputs=model.input, outputs=model.get_layer('dense_1').output)
-    test_datagen = ImageDataGenerator(rescale=1. / 255, dtype='float32')
-    query_generator = test_datagen.flow_from_directory(
-        directory=test_path,
-        target_size=(224, 224),
-        classes=['query'],
-        color_mode="rgb",
-        batch_size=32,
-        class_mode=None,
-        shuffle=False
-    )
-    query_vecs = intermediate_layer_model.predict_generator(query_generator, steps=len(query_generator), verbose=1)
-
-    reference_generator = test_datagen.flow_from_directory(
-        directory=test_path,
-        target_size=(224, 224),
-        classes=['reference'],
-        color_mode="rgb",
-        batch_size=32,
-        class_mode=None,
-        shuffle=False
-    )
-    reference_vecs = intermediate_layer_model.predict_generator(reference_generator, steps=len(reference_generator),
-                                                                verbose=1)
-
-    return queries, query_vecs, db, reference_vecs
-
-
-if __name__ == '__main__':
+if __name__ == "__main__":
     args = argparse.ArgumentParser()
 
     # hyperparameters
@@ -121,42 +182,23 @@ if __name__ == '__main__':
     args.add_argument('--pause', type=int, default=0, help='model 을 load 할때 1로 설정됩니다.')
     config = args.parse_args()
 
+
+
     # training parameters
     nb_epoch = config.epoch
     batch_size = config.batch_size
     num_classes = config.num_classes
-    input_shape = (224, 224, 3)  # input image shape
+    input_shape = (3, 224, 224)  # input image shape
+
 
     """ Model """
-    #model = Sequential()
-    #model.add(Conv2D(32, (3, 3), padding='same', input_shape=input_shape))
-    #model.add(Activation('relu'))
-    #model.add(Conv2D(32, (3, 3)))
-    #model.add(Activation('relu'))
-    #model.add(MaxPooling2D(pool_size=(2, 2)))
-    #model.add(Dropout(0.25))
-
-    #model.add(Conv2D(64, (3, 3), padding='same'))
-    #model.add(Activation('relu'))
-    #model.add(Conv2D(64, (3, 3)))
-    #model.add(Activation('relu'))
-    #model.add(MaxPooling2D(pool_size=(2, 2)))
-    #model.add(Dropout(0.25))
-
-    #model.add(Flatten())
-    #model.add(Dense(512))
-    #model.add(Activation('relu'))
-    #model.add(Dropout(0.5))
-    #model.add(Dense(num_classes))
-    #model.add(Activation('softmax'))
-    tempModel=ResNet50(weights='imagenet')
-    x123 = Dense(num_classes, activation='softmax')(tempModel.layers[-2].output)
-    model=Model(inputs=tempModel.input,output=x123)
-
+    resnet_model = ResNet50(weights='imagenet', input_shape=(3,224,224))
+    out = Dense(num_classes, activation='softmax')(resnet_model.layers[-2].output)
+    model = Model(inputs=vgg16_model.input, output=out)
     model.summary()
 
     bind_model(model)
-
+    
     if config.pause:
         nsml.paused(scope=locals())
 
@@ -165,13 +207,12 @@ if __name__ == '__main__':
         bTrainmode = True
 
         """ Initiate RMSprop optimizer """
-        opt = keras.optimizers.Adam(lr=0.00045, decay=1e-6)
+        opt = keras.optimizers.Adam(lr=0.000045, decay=1e-6)
         model = multi_gpu_model(model, gpus=2)
         model.compile(loss='categorical_crossentropy',
                       optimizer=opt,
                       metrics=['accuracy'])
 
-        print('dataset path', DATASET_PATH)
 
         train_datagen = ImageDataGenerator(
             rescale=1. / 255,
@@ -182,7 +223,7 @@ if __name__ == '__main__':
 
         train_generator = train_datagen.flow_from_directory(
             directory=DATASET_PATH + '/train/train_data',
-            target_size=input_shape[:2],
+            target_size=(224,224),
             color_mode="rgb",
             batch_size=batch_size,
             class_mode="categorical",
@@ -192,7 +233,7 @@ if __name__ == '__main__':
         )
         val_generator= train_datagen.flow_from_directory(
             directory=DATASET_PATH + '/train/train_data',
-            target_size=input_shape[:2],
+            target_size=(224,224),
             color_mode="rgb",
             batch_size=batch_size,
             class_mode="categorical",
@@ -204,6 +245,7 @@ if __name__ == '__main__':
         """ Callback """
         monitor = 'val_acc'
         reduce_lr = ReduceLROnPlateau(monitor=monitor, patience=3)
+
 
         """ Training loop """
         STEP_SIZE_TRAIN = train_generator.n // train_generator.batch_size
