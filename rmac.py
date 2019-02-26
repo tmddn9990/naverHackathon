@@ -24,17 +24,17 @@ from keras.layers import Dense, Dropout, Flatten, Activation
 from keras.layers import Convolution2D, MaxPooling2D
 from keras.callbacks import ReduceLROnPlateau
 from keras.preprocessing.image import ImageDataGenerator
-from keras.utils.training_utils import multi_gpu_model
+#from keras.utils.training_utils import multi_gpu_model
+from keras.preprocessing import image
 from keras.applications.vgg16 import VGG16
+from keras.applications.vgg19 import VGG19
 from keras.applications.resnet50 import ResNet50
+#from ResNet101 import ResNet101
 
-K.set_image_dim_ordering('th')
+#K.set_image_dim_ordering('th')
 
 import warnings
 warnings.filterwarnings("ignore")
-
-
-
 
 def addition(x):
     sum = K.sum(x, axis=1)
@@ -54,7 +54,7 @@ def rmac(model, num_rois):
     # Regions as input
     in_roi = Input(shape=(num_rois, 4), name='input_roi')
     # ROI pooling
-    x = RoiPooling([1], num_rois)([model.layers[-3].output, in_roi])
+    x = RoiPooling([1], num_rois)([model.layers[-5].output, in_roi])
     # Normalization
     x = Lambda(lambda x: K.l2_normalize(x, axis=2), name='norm1')(x)
     # PCA
@@ -78,11 +78,15 @@ def rmac(model, num_rois):
     return model
 
 
+#def l2_normalize(v):
+#    norm = np.linalg.norm(v)
+#    if norm == 0:
+#        return v
+#    return v / norm
+
 def l2_normalize(v):
-    norm = np.linalg.norm(v)
-    if norm == 0:
-        return v
-    return v / norm
+    norm = np.linalg.norm(v, axis=1, keepdims=True)
+    return np.divide(v, norm, where=norm!=0)  # only divide nonzeros else 1
 
 
 
@@ -141,7 +145,7 @@ def bind_model(model):
         )
         reference_vecs = rmac_model.predict_generator(multi_input(reference_generator, regions), steps=len(reference_generator), verbose=1)
     
-        # l2 normalization
+        ## l2 normalization
         query_vecs = l2_normalize(query_vecs)
         reference_vecs = l2_normalize(reference_vecs)
         
@@ -149,6 +153,28 @@ def bind_model(model):
         sim_matrix = np.dot(query_vecs, reference_vecs.T)
         indices = np.argsort(sim_matrix, axis=1)
         indices = np.flip(indices, axis=1)
+
+        
+        top = 5
+        res = query_vecs[0]
+        for j in range(0, top):
+                res += reference_vecs[indices[0][j]]
+        res = res / (top + 1)
+        res = [res]
+
+        for i in range(1, len(query_vecs)):
+            sum = query_vecs[i]
+            for j in range(0, top):
+                sum += reference_vecs[indices[i][j]]
+            sum = sum / (top + 1)
+            sum = [sum]
+            res = np.concatenate((res, sum), axis=0)
+
+        res = l2_normalize(res)
+        sim_matrix = np.dot(res, reference_vecs.T)
+        indices = np.argsort(sim_matrix, axis=1)
+        indices = np.flip(indices, axis=1)
+        #############################
 
         retrieval_results = {}
 
@@ -188,13 +214,16 @@ if __name__ == "__main__":
     nb_epoch = config.epoch
     batch_size = config.batch_size
     num_classes = config.num_classes
-    input_shape = (3, 224, 224)  # input image shape
+    input_shape = (224, 224, 3)  # input image shape
 
 
     """ Model """
-    resnet_model = ResNet50(weights='imagenet', input_shape=(3,224,224))
-    out = Dense(num_classes, activation='softmax')(resnet_model.layers[-2].output)
-    model = Model(inputs=resnet_model.input, output=out)
+    #temp_model = ResNet50(weights='imagenet', input_shape=input_shape)
+    #temp_model = VGG16(weights='imagenet', input_shape=input_shape)
+    #temp_model = ResNet101(None)
+    temp_model = VGG16(weights=None, input_shape=input_shape)
+    out = Dense(num_classes, activation='softmax')(temp_model.layers[-2].output)
+    model = Model(inputs=temp_model.input, output=out)
     model.summary()
 
     bind_model(model)
@@ -206,21 +235,35 @@ if __name__ == "__main__":
     if config.mode == 'train':
         bTrainmode = True
 
+        nsml.load(checkpoint='saved', session='CAU_LOVER/ir_ph2/310')
+        nsml.save("last")
+        exit()
+
         """ Initiate RMSprop optimizer """
         opt = keras.optimizers.Adam(lr=0.000045, decay=1e-6)
-        model = multi_gpu_model(model, gpus=2)
+        #model = multi_gpu_model(model, gpus=2)
         model.compile(loss='categorical_crossentropy',
                       optimizer=opt,
                       metrics=['accuracy'])
 
 
+        #train_datagen = ImageDataGenerator(
+        #    rescale=1. / 255,
+        #    shear_range=0.2,
+        #    zoom_range=0.2,
+        #    horizontal_flip=True,
+        #    validation_split=0.1)
         train_datagen = ImageDataGenerator(
-            rescale=1. / 255,
-            shear_range=0.2,
-            zoom_range=0.2,
+            rotation_range=45,
+            width_shift_range=0.3,
+            height_shift_range=0.3,
+            rescale=1./255,
+            shear_range=0.3,
+            zoom_range=0.3,
             horizontal_flip=True,
+            fill_mode='nearest',
             validation_split=0.1)
-
+        
         train_generator = train_datagen.flow_from_directory(
             directory=DATASET_PATH + '/train/train_data',
             target_size=(224,224),

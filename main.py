@@ -23,7 +23,7 @@ from keras.applications.resnet50 import ResNet50
 def bind_model(model):
     def save(dir_name):
         os.makedirs(dir_name, exist_ok=True)
-        model.save_weights(os.path.join(dir_name, 'model'))
+        model.save_weights(os.path.jaoin(dir_name, 'model'))
         print('model saved!')
 
     def load(file_path):

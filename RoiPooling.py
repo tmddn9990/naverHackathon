@@ -104,7 +104,7 @@ class RoiPooling(Layer):
 
                             x1 = K.cast(K.round(x1), 'int32')
                             x2 = K.cast(K.round(x2), 'int32')
-                            y1 = K.cast(K.round(y1),     'int32')
+                            y1 = K.cast(K.round(y1), 'int32')
                             y2 = K.cast(K.round(y2), 'int32')
 
                             new_shape = [input_shape[0], y2 - y1,
